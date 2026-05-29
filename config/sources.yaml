@@ -1,0 +1,122 @@
+# =============================================================================
+# Configuration d'ingestion - Fusion Data Pipeline
+# =============================================================================
+# Ce fichier décrit comment lire chaque type de source de données.
+# Pour ajouter une nouvelle source, ajouter une nouvelle entrée dans `schemas`
+# sans modifier le code Python.
+#
+# Format canonique de sortie (commun à toutes les sources après ingestion) :
+#   - time_s              : temps en secondes (float)
+#   - plasma_current_MA   : courant plasma en méga-ampères
+#   - electron_density    : densité électronique en 1e19 m^-3
+#   - electron_temperature: température électronique en keV
+#   - loop_voltage        : tension boucle en volts
+# =============================================================================
+
+# Nom des colonnes canoniques (la "lingua franca" du pipeline)
+canonical_columns:
+  time: time_s
+  current: plasma_current_MA
+  density: electron_density
+  temperature: electron_temperature
+  vloop: loop_voltage
+
+# Définition des schémas connus.
+# Le module d'ingestion détermine le schéma applicable à partir des métadonnées
+# de la décharge (file_format, current_unit, column_naming_scheme).
+schemas:
+
+  # ---------------------------------------------------------------------------
+  # Schéma "canonical" : noms canoniques, courant en MA
+  # ---------------------------------------------------------------------------
+  canonical_MA:
+    description: "Décharge avec noms de colonnes canoniques et courant en MA"
+    column_mapping:
+      time_s: time
+      plasma_current: current
+      electron_density: density
+      electron_temperature: temperature
+      loop_voltage: vloop
+    unit_conversions:
+      current: 1.0          # MA -> MA, pas de conversion
+    expected_columns: [time_s, plasma_current, electron_density, electron_temperature, loop_voltage]
+
+  # ---------------------------------------------------------------------------
+  # Schéma "canonical" : noms canoniques, courant en Ampères bruts
+  # ---------------------------------------------------------------------------
+  canonical_A:
+    description: "Décharge avec noms canoniques mais courant en Ampères bruts"
+    column_mapping:
+      time_s: time
+      plasma_current: current
+      electron_density: density
+      electron_temperature: temperature
+      loop_voltage: vloop
+    unit_conversions:
+      current: 1.0e-6       # A -> MA
+    expected_columns: [time_s, plasma_current, electron_density, electron_temperature, loop_voltage]
+
+  # ---------------------------------------------------------------------------
+  # Schéma "raw" : noms courts type t, Ip, ne, Te, Vl
+  # ---------------------------------------------------------------------------
+  raw_MA:
+    description: "Noms courts (Ip, ne, Te, Vl), courant en MA"
+    column_mapping:
+      t: time
+      Ip: current
+      ne: density
+      Te: temperature
+      Vl: vloop
+    unit_conversions:
+      current: 1.0
+    expected_columns: [t, Ip, ne, Te, Vl]
+
+  raw_A:
+    description: "Noms courts, courant en Ampères bruts"
+    column_mapping:
+      t: time
+      Ip: current
+      ne: density
+      Te: temperature
+      Vl: vloop
+    unit_conversions:
+      current: 1.0e-6
+    expected_columns: [t, Ip, ne, Te, Vl]
+
+  # ---------------------------------------------------------------------------
+  # Schéma "verbose" : noms longs et descriptifs
+  # ---------------------------------------------------------------------------
+  verbose_MA:
+    description: "Noms longs et descriptifs, courant en MA"
+    column_mapping:
+      timestamp_seconds: time
+      Ip_plasma_MA: current
+      ne_electron_1e19_m3: density
+      Te_electron_keV: temperature
+      V_loop_volts: vloop
+    unit_conversions:
+      current: 1.0
+    expected_columns: [timestamp_seconds, Ip_plasma_MA, ne_electron_1e19_m3, Te_electron_keV, V_loop_volts]
+
+  verbose_A:
+    description: "Noms longs et descriptifs, courant en Ampères bruts"
+    column_mapping:
+      timestamp_seconds: time
+      Ip_plasma_MA: current        # malgré le nom MA, on déclare A dans la métadonnée
+      ne_electron_1e19_m3: density
+      Te_electron_keV: temperature
+      V_loop_volts: vloop
+    unit_conversions:
+      current: 1.0e-6
+    expected_columns: [timestamp_seconds, Ip_plasma_MA, ne_electron_1e19_m3, Te_electron_keV, V_loop_volts]
+
+# =============================================================================
+# Règles de résolution : comment choisir un schéma à partir des métadonnées
+# d'une décharge ?
+# =============================================================================
+# Le module d'ingestion combine column_naming_scheme + current_unit pour
+# déduire le nom du schéma à appliquer : "{naming}_{unit}".
+# Exemple : column_naming_scheme=verbose, current_unit=A -> schéma "verbose_A"
+
+resolution:
+  pattern: "{column_naming_scheme}_{current_unit}"
