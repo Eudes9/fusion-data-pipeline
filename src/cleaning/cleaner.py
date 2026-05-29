@@ -85,72 +85,85 @@ def resample_to_grid(
     """
     Rééchantillonne le DataFrame sur une grille temporelle uniforme à target_hz.
 
-    Utilise l'interpolation linéaire pour les valeurs aux nouveaux instants.
-    Ne touche pas aux valeurs déjà NaN : elles restent NaN pour traitement
-    spécifique ultérieur.
+    Utilise np.interp pour l'interpolation linéaire, qui étend automatiquement
+    par les valeurs aux bornes (pas de NaN d'extrémité). Les NaN à l'intérieur
+    du signal source sont filtrés avant interpolation pour ne pas les propager
+    artificiellement ; ils sont traités par la suite par impute_short_gaps.
     """
     if df.empty:
         return df.copy()
 
-    t_min = df[time_col].iloc[0]
-    t_max = df[time_col].iloc[-1]
+    t_orig = df[time_col].values
+    t_min = t_orig[0]
+    t_max = t_orig[-1]
     n_target = int(round((t_max - t_min) * target_hz)) + 1
     new_time = np.linspace(t_min, t_max, n_target)
 
-    # Interpolation colonne par colonne, en préservant les NaN longs
     result = pd.DataFrame({time_col: new_time})
+
     for col in df.columns:
         if col == time_col:
             continue
-        # np.interp ignore les NaN en interpolant à travers ; on veut les garder.
-        # On utilise pandas avec set_index pour préserver le comportement attendu.
-        s = pd.Series(df[col].values, index=df[time_col].values)
-        # Reindex à la nouvelle grille avec interpolation pour les points
-        # qui existent (la gestion des NaN longs est faite ailleurs).
-        s_new = s.reindex(s.index.union(new_time)).interpolate(method="index")
-        s_new = s_new.loc[new_time]
-        result[col] = s_new.values
+        values = df[col].values.astype(float)
+
+        # np.interp ne sait pas gérer les NaN dans la source : on interpole
+        # uniquement sur les points valides. Les zones manquantes seront
+        # détectées et traitées par impute_short_gaps en aval.
+        valid = ~np.isnan(values)
+
+        if valid.sum() < 2:
+            # Pas assez de points valides pour interpoler : on remplit de NaN
+            result[col] = np.full(n_target, np.nan)
+            continue
+
+        # Interpolation linéaire avec extension constante aux bornes
+        # (comportement par défaut de np.interp : left=values[valid][0], right=values[valid][-1])
+        result[col] = np.interp(new_time, t_orig[valid], values[valid])
 
     return result
-
-
 # =============================================================================
 # 2. Détection des aberrants (méthode MAD - Median Absolute Deviation)
 # =============================================================================
 
 def detect_outliers_mad(
-    signal: np.ndarray, threshold: float = 6.0
+    signal: np.ndarray, threshold: float = 6.0, window: int = 101
 ) -> np.ndarray:
     """
-    Détecte les valeurs aberrantes par la méthode MAD (Median Absolute
-    Deviation), robuste aux valeurs extrêmes.
+    Détecte les valeurs aberrantes par la méthode MAD glissante.
 
-    Quand le MAD est dégénéré (signal quasi-constant), on bascule sur un
-    z-score classique : c'est moins robuste mais ça permet de détecter
-    quand même les vraies anomalies.
+    Pour chaque point, calcule la médiane et le MAD sur une fenêtre locale
+    centrée. Un point est marqué aberrant s'il s'écarte fortement de cette
+    tendance locale. Adapté aux signaux structurés (rampes, plateaux) où
+    une MAD globale ne marcherait pas.
+
+    Args:
+        signal : série temporelle 1D
+        threshold : seuil en modified z-scores (6.0 = très conservateur)
+        window : taille de la fenêtre glissante (impaire, ~100 ms à 1 kHz)
 
     Retourne un masque booléen : True = aberrant.
     """
     valid = ~np.isnan(signal)
-    if valid.sum() < 10:
+    if valid.sum() < window:
         return np.zeros_like(signal, dtype=bool)
 
-    median = np.nanmedian(signal)
-    mad = np.nanmedian(np.abs(signal - median))
+    # Médiane glissante (tendance locale)
+    s = pd.Series(signal)
+    local_median = s.rolling(window=window, center=True, min_periods=1).median()
 
-    # Cas dégénéré : MAD nul ou très petit (signal quasi-constant).
-    # On utilise alors un z-score classique comme fallback.
-    if mad < 1e-9:
-        std = np.nanstd(signal)
-        if std < 1e-9:
-            # Vraiment constant : pas d'aberrant possible
-            return np.zeros_like(signal, dtype=bool)
-        z = (signal - np.nanmean(signal)) / std
-        return np.abs(z) > threshold
+    # Écart absolu à la tendance locale
+    abs_dev = (s - local_median).abs()
 
-    # Cas normal : modified z-score via MAD
-    modified_z = 0.6745 * (signal - median) / mad
-    return np.abs(modified_z) > threshold
+    # MAD glissant (échelle locale du bruit)
+    local_mad = abs_dev.rolling(window=window, center=True, min_periods=1).median()
+
+    # Modified z-score local
+    # On évite la division par zéro en ajoutant un epsilon minuscule
+    eps = 1e-9
+    modified_z = 0.6745 * (s - local_median) / (local_mad + eps)
+
+    mask = modified_z.abs() > threshold
+    return mask.values
 # =============================================================================
 # 3. Imputation des valeurs manquantes
 # =============================================================================
